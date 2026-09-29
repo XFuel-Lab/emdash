@@ -189,6 +189,40 @@ const hasPaymentHeader = x402.hasPayment(Astro.request);
 	header. Use `enforce()` before returning paid content.
 </Aside>
 
+## Record settled payments
+
+Use `onSettled` to log paid reads, send analytics events, issue receipts, or feed a revenue dashboard. It runs once for each request whose payment settles successfully, and never for a `402`, a failed verification, a failed settlement, or a request skipped in bot-only mode.
+
+The integration config is serialized into the build, so pass a module reference rather than a function. Relative paths resolve from the project root:
+
+```js title="astro.config.mjs"
+x402({
+	payTo: "0xYourWallet",
+	network: "eip155:8453",
+	onSettled: { module: "./src/x402-hooks.ts", export: "onSettled" },
+});
+```
+
+```ts title="src/x402-hooks.ts"
+import type { X402SettledEvent } from "@emdash-cms/x402";
+
+export async function onSettled({ payer, settlement, requirements, resource }: X402SettledEvent) {
+	console.log("paid read", resource.url, payer, requirements.amount, settlement.transaction);
+}
+```
+
+The event contains:
+
+| Field          | Description                                                          |
+| -------------- | -------------------------------------------------------------------- |
+| `payer`        | Payer wallet address reported by the facilitator                     |
+| `settlement`   | Facilitator settlement response (`transaction`, `network`, `payer`)  |
+| `requirements` | Payment requirements the payment settled against (`amount`, `asset`) |
+| `resource`     | Paid resource: `url` (request path), `description`, `mimeType`       |
+| `request`      | The incoming `Request`                                               |
+
+The hook never delays or fails the response. It starts after `enforce()` returns, and a thrown error or rejected promise is caught and logged with `console.warn`. Set `onError` (another module reference) to handle those errors yourself. Under the Cloudflare adapter the hook's promise is passed to `waitUntil`, so asynchronous work can finish after the response is sent. On other adapters it runs in the background.
+
 ## Configuration reference
 
 | Option              | Type      | Default                          | Description                                      |
@@ -203,6 +237,8 @@ const hasPaymentHeader = x402.hasPayment(Astro.request);
 | `svm`               | `boolean` | `false`                          | Enable Solana Virtual Machine support (requires `@x402/svm`) |
 | `botOnly`           | `boolean` | `false`                          | Only enforce payment for bots                     |
 | `botScoreThreshold` | `number`  | `30`                             | Bot score threshold (1-99, lower = more likely bot) |
+| `onSettled`         | `{ module, export? }` | —                    | Hook called after a successful settlement ([details](#record-settled-payments)) |
+| `onError`           | `{ module, export? }` | —                    | Handles errors thrown by `onSettled` (defaults to `console.warn`) |
 
 ### Price format
 
@@ -257,3 +293,4 @@ x402({
 3. Without a payment header, `enforce()` returns a `402 Payment Required` response whose body and `PAYMENT-REQUIRED` header describe the accepted payment.
 4. With a matching payment, the configured facilitator verifies and settles it.
 5. `enforce()` returns the payer and settlement result. Call `applyHeaders()` so the page response includes the facilitator's `PAYMENT-RESPONSE` proof.
+6. If `onSettled` is configured and settlement succeeded, the hook runs in the background with the payer, settlement, requirements, resource, and request.

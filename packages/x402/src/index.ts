@@ -34,9 +34,12 @@
  * ```
  */
 
+import { fileURLToPath } from "node:url";
+
 import type { AstroIntegration } from "astro";
 
 import type { X402Config } from "./types.js";
+import { generateConfigModule, validateHooks } from "./virtual-config.js";
 
 const VIRTUAL_MODULE_ID = "virtual:x402/config";
 const RESOLVED_VIRTUAL_MODULE_ID = "\0" + VIRTUAL_MODULE_ID;
@@ -45,10 +48,16 @@ const RESOLVED_VIRTUAL_MODULE_ID = "\0" + VIRTUAL_MODULE_ID;
  * Create the x402 Astro integration.
  */
 export function x402(config: X402Config): AstroIntegration {
+	// Fail at config load, not first request, when a hook cannot be serialized.
+	validateHooks(config);
+
 	return {
 		name: "@emdash-cms/x402",
 		hooks: {
-			"astro:config:setup": ({ addMiddleware, updateConfig }) => {
+			"astro:config:setup": ({ addMiddleware, updateConfig, config: astroConfig }) => {
+				const root = fileURLToPath(astroConfig.root);
+				const adapterName = astroConfig.adapter?.name;
+
 				// Inject the virtual module that provides config to the middleware.
 				// The middleware must be excluded from Vite's SSR dependency optimizer
 				// because esbuild cannot resolve virtual modules — only Vite plugins can.
@@ -62,7 +71,7 @@ export function x402(config: X402Config): AstroIntegration {
 								},
 								load(id: string) {
 									if (id === RESOLVED_VIRTUAL_MODULE_ID) {
-										return `export default ${JSON.stringify(config)}`;
+										return generateConfigModule(config, { root, adapterName });
 									}
 								},
 							},
@@ -96,4 +105,9 @@ export type {
 	Price,
 	X402Config,
 	X402Enforcer,
+	X402HookErrorHandler,
+	X402HookReference,
+	X402ResourceInfo,
+	X402SettledEvent,
+	X402SettledHook,
 } from "./types.js";

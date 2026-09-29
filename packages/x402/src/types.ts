@@ -2,7 +2,7 @@
  * x402 Payment Integration Types
  */
 
-import type { SettleResponse } from "@x402/core/types";
+import type { PaymentRequirements, SettleResponse } from "@x402/core/types";
 
 /** CAIP-2 network identifier (e.g., "eip155:8453" for Base mainnet) */
 export type Network = `${string}:${string}`;
@@ -63,6 +63,89 @@ export interface X402Config {
 	 * Score range: 1 (almost certainly bot) to 99 (almost certainly human).
 	 */
 	botScoreThreshold?: number;
+	/**
+	 * Called after a payment settles successfully, for logging, analytics,
+	 * receipts, or revenue reporting.
+	 *
+	 * Runs after `enforce()` has produced its result and never delays or fails
+	 * the response: synchronous throws and rejected promises are caught and
+	 * passed to `onError` (or logged with `console.warn`). Under the Cloudflare
+	 * adapter the returned promise is handed to `waitUntil` so the work can
+	 * finish after the response is sent.
+	 *
+	 * The integration config is serialized into the build, so functions cannot
+	 * be passed to `x402()` in `astro.config.mjs`. Pass a module reference
+	 * instead; the integration imports the named export at build time. A
+	 * function is accepted when calling `createEnforcer()` directly.
+	 *
+	 * @example
+	 * ```ts
+	 * x402({
+	 *   payTo: "0xYourWallet",
+	 *   network: "eip155:8453",
+	 *   onSettled: { module: "./src/x402-hooks.ts", export: "onSettled" },
+	 * });
+	 * ```
+	 */
+	onSettled?: X402SettledHook | X402HookReference;
+	/**
+	 * Called when `onSettled` throws or rejects. Defaults to logging the error
+	 * with `console.warn`. Errors thrown by `onError` itself are discarded.
+	 * Accepts the same forms as `onSettled`.
+	 */
+	onError?: X402HookErrorHandler | X402HookReference;
+}
+
+/**
+ * A reference to a named export of a module, resolved by the integration at
+ * build time. Relative paths resolve from the Astro project root.
+ */
+export interface X402HookReference {
+	/** Module specifier: a package name or a path relative to the project root */
+	module: string;
+	/** Named export to use. Defaults to the option name (`onSettled` or `onError`). */
+	export?: string;
+}
+
+/**
+ * Details of a successfully settled payment, passed to `onSettled`.
+ */
+export interface X402SettledEvent {
+	/** The payer's wallet address, as reported by the facilitator */
+	payer?: string;
+	/** Settlement response from the facilitator (transaction, network, payer) */
+	settlement: SettleResponse;
+	/** The payment requirements the payment was settled against */
+	requirements: PaymentRequirements;
+	/** The resource that was paid for */
+	resource: X402ResourceInfo;
+	/** The incoming request that carried the payment */
+	request: Request;
+}
+
+/** Resource information describing what was paid for. */
+export interface X402ResourceInfo {
+	/** Request path of the paid resource */
+	url: string;
+	/** Resource description passed to enforce() */
+	description?: string;
+	/** MIME type hint passed to enforce() */
+	mimeType?: string;
+}
+
+/** Callback invoked after a payment settles successfully. */
+export type X402SettledHook = (event: X402SettledEvent) => void | Promise<void>;
+
+/** Callback invoked when `onSettled` throws or rejects. */
+export type X402HookErrorHandler = (error: unknown, event: X402SettledEvent) => void;
+
+/**
+ * Host runtime hooks for the enforcer. The middleware supplies `waitUntil`
+ * under the Cloudflare adapter so deferred callbacks can outlive the response.
+ */
+export interface X402Runtime {
+	/** Extends the lifetime of the request past the response (e.g. Workers `waitUntil`) */
+	waitUntil?: (promise: Promise<unknown>) => void;
 }
 
 /**

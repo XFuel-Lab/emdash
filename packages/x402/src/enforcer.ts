@@ -12,7 +12,16 @@ import {
 } from "@x402/core/http";
 import { HTTPFacilitatorClient, x402ResourceServer, type ResourceConfig } from "@x402/core/server";
 
-import type { EnforceOptions, EnforceResult, X402Config, X402Enforcer } from "./types.js";
+import type {
+	EnforceOptions,
+	EnforceResult,
+	X402Config,
+	X402Enforcer,
+	X402HookErrorHandler,
+	X402Runtime,
+	X402SettledEvent,
+	X402SettledHook,
+} from "./types.js";
 
 const PAYMENT_SIGNATURE_HEADER = "payment-signature";
 const PAYMENT_REQUIRED_HEADER = "PAYMENT-REQUIRED";
@@ -101,11 +110,58 @@ function isBot(request: Request, threshold: number): boolean {
 }
 
 /**
+ * Run the `onSettled` hook without blocking or failing the response.
+ *
+ * The hook starts on a later task (a zero-delay timer, not a microtask), so
+ * even its synchronous work runs after the caller has resumed from
+ * `enforce()` and continued rendering. Sync throws and async rejections are routed to
+ * `onError` (or `console.warn`), and the guarded promise is handed to the
+ * host's `waitUntil` when one is available so it can finish after the
+ * response is sent. Without `waitUntil` it is fire-and-forget.
+ */
+function dispatchSettled(
+	onSettled: X402SettledHook,
+	onError: X402HookErrorHandler | undefined,
+	event: X402SettledEvent,
+	runtime: X402Runtime | undefined,
+): void {
+	const task = new Promise<void>((resolve) => {
+		setTimeout(resolve, 0);
+	})
+		.then(() => onSettled(event))
+		.catch((error: unknown) => {
+			if (onError) {
+				try {
+					onError(error, event);
+				} catch {
+					// An error handler that throws must not surface as an unhandled rejection.
+				}
+				return;
+			}
+			console.warn("[x402] onSettled hook failed:", error);
+		});
+
+	if (runtime?.waitUntil) {
+		try {
+			runtime.waitUntil(task);
+		} catch {
+			// waitUntil can throw outside a request context; the task still runs.
+		}
+	}
+}
+
+/**
  * Create an X402Enforcer for the given configuration.
  * Called once by the middleware, reused across requests.
+ *
+ * @param config - Integration config. `onSettled` and `onError` must be
+ *   functions here; module references are resolved by the integration.
+ * @param runtime - Host hooks such as `waitUntil` for deferred callbacks.
  */
-export function createEnforcer(config: X402Config): X402Enforcer {
+export function createEnforcer(config: X402Config, runtime?: X402Runtime): X402Enforcer {
 	const botScoreThreshold = config.botScoreThreshold ?? DEFAULT_BOT_SCORE_THRESHOLD;
+	const onSettled = typeof config.onSettled === "function" ? config.onSettled : undefined;
+	const onError = typeof config.onError === "function" ? config.onError : undefined;
 
 	return {
 		async enforce(request: Request, options?: EnforceOptions): Promise<Response | EnforceResult> {
@@ -183,6 +239,21 @@ export function createEnforcer(config: X402Config): X402Enforcer {
 			const responseHeaders: Record<string, string> = {};
 			if (settleResult) {
 				responseHeaders[PAYMENT_RESPONSE_HEADER] = encodePaymentResponseHeader(settleResult);
+			}
+
+			if (onSettled && settleResult?.success) {
+				dispatchSettled(
+					onSettled,
+					onError,
+					{
+						payer: verifyResult.payer,
+						settlement: settleResult,
+						requirements: matchingReqs,
+						resource: resourceInfo,
+						request,
+					},
+					runtime,
+				);
 			}
 
 			return {
